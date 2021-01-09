@@ -1,0 +1,4 @@
+echo ====================
+echo    AVR compilation
+echo ====================
+sudo avrdude -c avrispmkII -B 64 -p m328p -P usb -U lfuse:w:0xFD:m -U flash:w:main.hex

@@ -1,0 +1,7 @@
+echo ====================
+echo    AVR compilation
+echo ====================
+avr-gcc -w -Os -mmcu=atmega328p -c -o main.o car/main.c
+avr-gcc -w -mmcu=atmega328p main.o -o main
+echo Making HEX
+avr-objcopy -O ihex -R .eeprom main main.hex
