@@ -4,6 +4,7 @@
 #include <util/delay.h>
 #include <avr/interrupt.h>
 #include "manchester.hh"
+#include "turn_struct.hh"
 
 //set desired baud rate
 #define BAUDRATE 1200
@@ -16,15 +17,19 @@
 //frame structure(in bytes, manchester encoded): 1 sync signal, 2 addr, 2 pos_x, 2 pos_y
 #define FRAME_SIZE 6//frame size in bytes without sync byte
 
-#define MAX_LOOPS 3//how many times program can loop without new information before PWM duty cycle will be set to 0
+#define MAX_LOOPS 20//how many times program can loop without new information before PWM duty cycle will be set to 0
+#define TURN_DIV 2//bigger number==slower turning speed
 
 volatile uint8_t data[FRAME_SIZE];
 volatile uint8_t i = 0;
 volatile uint8_t sync_byte = 0;
 volatile uint8_t dat_buf = 0;//data buffer
 volatile uint32_t no_new_data = 0;
+volatile uint8_t motor_command[2];
+volatile struct turn_factor turn;
 
-// PWM on PD6 and PD5
+// AIN1 PB1 - AIN2 PB2 - BIN1 PB3 - BIN2 PB4
+// PWMA PD6 - PWMB PD5
 // USART on PD0 
 
 void init_USART(){
@@ -51,7 +56,6 @@ ISR(USART_RX_vect){
         if(i == FRAME_SIZE){
             i = 0;
             sync_byte = 0;
-            no_new_data = 0;
         }
     }
 }
@@ -81,6 +85,8 @@ int main(){
     uint8_t j = 0;
 
     DDRD = 0xFE; // ports 1-7 as output
+    DDRB = 0xFF;
+    PORTB = 0x00; // low everywhere, no short circuit on H bridge
 
     cli();
     init_PWM();
@@ -100,28 +106,67 @@ int main(){
 
         //decoding
         manchester_decode(buf, FRAME_SIZE/2, encoded_data);
-        // if all decoded symbols were knows
+        // if all decoded symbols were known
         if(no_new_data<MAX_LOOPS){
             if(!(flags & (1<<MANCH_ERR))){
                 if(encoded_data[0] == RADDR){
-                    if(encoded_data[1] > 131){
-                        OCR0A = (encoded_data[1]-128)*2;
-                    } else if(encoded_data[1] < 124){
-                        OCR0A = (128-encoded_data[1])*2;
+                    no_new_data = 0;
+
+                    // getting joystick y_pos to each motor command
+                    motor_command[0] = encoded_data[2];
+                    motor_command[1] = encoded_data[2];
+
+                    if(encoded_data[1] > 131){// if joystick x_pos is on the left
+                        turn.value = encoded_data[1] - 128;
+                        turn.left = 1;
+                    } else if(encoded_data[1] < 124){// if joystick x_pos is on the right
+                        turn.value = 127 - encoded_data[1];
+                        turn.left = 0;
+                    }
+
+                    // if turn.left is 1 we decrease command for motor 0 and increase for motor 1
+                    // if turn is 0 we do opposite (to turn right)
+                    if(encoded_data[2] > turn.value/TURN_DIV){//subtraction cant be under 0
+                        motor_command[(turn.left+1)%2] -= turn.value/TURN_DIV;
+                    } else{
+                        motor_command[(turn.left+1)%2] = 0;
+                    }
+                    if(encoded_data[2] < encoded_data[2] + turn.value/TURN_DIV){//sum cant be over 255
+                        motor_command[turn.left] += turn.value/TURN_DIV;
+                    } else{
+                        motor_command[turn.left] = 255;
+                    }
+
+                    if(motor_command[0] > 145){
+                        OCR0A = (motor_command[0]-128)*2;
+                        PORTB &= ~(1<<PB2);
+                        PORTB |= (1<<PB1);
+                    } else if(motor_command[0] < 115){
+                        OCR0A = (127-motor_command[0])*2;
+                        PORTB &= ~(1<<PB1);
+                        PORTB |= (1<<PB2);
                     }else{
+                        PORTB &= ~((1<<PB2)|(1<<PB1));
                         OCR0A = 0;
                     }
-                    if(encoded_data[2] > 131){
-                        OCR0B = (encoded_data[2]-128)*2;
-                    } else if(encoded_data[2] < 124){
-                        OCR0B = (128-encoded_data[2])*2;
+                    if(motor_command[1] > 145){
+                        OCR0B = (motor_command[1]-128)*2;
+                        PORTB &= ~(1<<PB4);
+                        PORTB |= (1<<PB3);
+                    } else if(motor_command[1] < 115){
+                        OCR0B = (127-motor_command[1])*2;
+                        PORTB &= ~(1<<PB3);
+                        PORTB |= (1<<PB4);
                     }else{
+                        PORTB &= ~((1<<PB3)|(1<<PB4));
                         OCR0B = 0;
                     }
                 }
             }
         } else{
             OCR0A = 0;
+            PORTB &= ~((1<<PB3)|(1<<PB4));
+            PORTB &= ~((1<<PB2)|(1<<PB1));
             OCR0B = 0;
         }
         flags &= ~(1<<MANCH_ERR); //clear manchester error flag
